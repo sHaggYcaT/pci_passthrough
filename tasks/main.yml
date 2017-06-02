@@ -1,0 +1,536 @@
+---
+
+#TODO: check package names, install lspci
+- name: List of the videocard-s drivers
+  set_fact:
+    grubcfg: '/boot/grub/grub.cfg'
+    grubmkconfig: 'grub-mkconfig'
+    drivers_list: 
+    - 'xserver_xorg_video_amdgpu' 
+    - 'xserver_xorg_video_ati' 
+    - 'xserver_xorg_video_intel' 
+    - 'xserver_xorg_video_nvidia_340xx' 
+    - 'xserver_xorg_video_nvidia'
+
+  when: (ansible_distribution == "Ubuntu") or
+          (ansible_distribution == "\"elementary\"")
+
+- name: List of the videocard-s drivers
+  set_fact:
+    grubcfg: '/boot/grub2/grub.cfg'
+    grubmkconfig: 'grub2-mkconfig'
+    drivers_list:
+    - 'xorg_x11_drv_amdgpu'
+    - 'xorg_x11_drv_ati'
+    - 'xorg_x11_drv_nvidia'
+    - 'xorg_x11_drv_nvidia_340xx'
+    - 'xorg_x11_drv_intel'
+  when: ansible_distribution == "Fedora"
+
+- name: create {{ drivers_list_path }} if it doesn't exist
+  file:
+    path: "{{ drivers_list_path }}"
+    state: directory
+
+- name: push lists of the videocards
+  template:
+    src: "{{ item }}.j2"
+    dest: "{{ drivers_list_path }}{{ item }}"
+  with_items: "{{ drivers_list }}"
+
+- name: Solving hv-vendor problem in the old qemu/libvirt
+  template:
+    src: kvm-spice-hv-vendor.sh.j2
+    dest: /usr/local/bin/kvm-spice-hv-vendor.sh
+    owner: root
+    group: root
+    mode: 0755
+  when: ansible_distribution == "\"elementary\""
+
+- name: Install enable and disable passthrough scripts
+  template:
+    src: "{{ item }}.j2"
+    dest: "/usr/local/bin/{{ item }}"
+    owner: root
+    group: root
+    mode: 0755
+  with_items:
+    - 'vga_disable_passthrough.sh'
+    - 'vga_passthrough.sh'
+
+#TODO: check if it really required in the all systems. May be it required only for the buggy motherboards
+- name: vfio.conf file
+  template:
+    src: vfio.conf
+    dest: /etc/modprobe.d/vfio.conf
+    owner: root
+    group: root
+    mode: 0744
+
+############## Configuring if motherboard broken
+
+- name: push list of the motherboards
+  template:
+    src: "broken_motherboards.j2"
+    dest: "{{ drivers_list_path }}/broken_motherboards"
+
+- name: Get Motherboard type
+  shell: "dmidecode | grep -A2 'Base Board Information' | tail -1 | cut -f2 -d:| sed 's/^\ //g'"
+  register: motherboard_name
+
+- name: Check if broken iommu in the motherboard
+  shell: grep -Rni "{{ motherboard_name.stdout }}" {{ drivers_list_path }}/broken_motherboards 1>/dev/null 2>&1; echo $?
+  register: if_broken_motherboard
+
+- name: We have to use special options in the grub, if IOMMU in our motherboard partly broken
+  set_fact:
+    broken_iommu_motherboard: true
+  when: if_broken_motherboard.stdout == '0'
+
+############### Configuring host videocard
+
+- name: Getting pci id of the first video card - host videocard
+  shell: 'lspci | grep -i --color "vga\|3d\|2d" | head -1 | cut -f1 -d" "'
+  register: host_videocard_id_register
+  when: not revert_video_card
+
+- name: Ansible Workaroud 1 (ansible rewrites register if when failed anyway) - host videocard
+  set_fact:
+    host_videocard_id: "{{ host_videocard_id_register.stdout }}"
+  when: not revert_video_card
+
+- name: debug host_videocard_id1 - host videocard
+  debug:
+    msg: "{{ host_videocard_id }}"
+  when: host_videocard_id is defined
+
+- name: Getting pci id of the last video card - host videocard
+  shell: 'lspci | grep -i --color "vga\|3d\|2d" | tail -1 | cut -f1 -d" "'
+  register: host_videocard_id_register
+  when: revert_video_card
+
+- name: Ansible Workaroud 2 (ansible rewrites register if when failed anyway) - host videocard
+  set_fact:
+    host_videocard_id: "{{ host_videocard_id_register.stdout }}"
+  when: revert_video_card
+
+- name: debug host_videocard_id2 - host videocard
+  debug:
+    msg: "{{ host_videocard_id }}"
+
+- name: Install script for getting videocard's name
+  template:
+    src: 'videocard_name.sh.j2'
+    mode: 0755
+    dest: "/usr/local/bin/videocard_name.sh"
+
+- name: Getting name of the video card
+  shell: "/usr/local/bin/videocard_name.sh {{ host_videocard_id }}"
+  register: host_videocard_name
+
+- name: Iterate Xorg's drivers
+  shell: grep -Rni "{{ host_videocard_name.stdout }}" {{ drivers_list_path }}/{{ item }} 1>/dev/null 2>&1; echo $?
+  register: host_videocard_dic
+  with_items: "{{ drivers_list }}"
+
+- name: debug iteration
+  debug:
+    msg: "{{ host_videocard_dic }}"
+
+- name: debug iteration2
+  debug:
+    msg: "Result is {{ loop_item.stdout }} and item is ({{ loop_item.item }})"
+  when: loop_item.stdout == '0'
+  loop_control:
+    loop_var: loop_item
+  with_items: "{{ host_videocard_dic.results }}"
+
+#TODO: add test to more then 2 videocards
+- name: Get Xorg's required driver
+  set_fact:
+    required_video_driver: "{{ loop_item.item  | regex_replace('_','-') }}"
+  when: loop_item.stdout == '0'
+  loop_control:
+    loop_var: loop_item
+  with_items: "{{ host_videocard_dic.results }}"
+
+- name: debug getting required driver
+  debug:
+    msg: "{{ required_video_driver }}"
+
+- name: if check required driver
+  fail:
+    msg: "Can't get required video driver!!"
+  when: required_video_driver is undefined
+
+#TODO: may be good idea to use nouveau instead nvidia in some cases. Better to add special variable?
+- name: blacklist nouveau driver
+  kernel_blacklist:
+    name: nouveau
+    state: present
+
+- name: Ensure we're remove all conflicted packages
+  dnf:
+    name: "{{ item | regex_replace('_','-')}}"
+    state: absent
+  when: (item | regex_replace('_','-') != required_video_driver) and
+        (ansible_distribution == "Fedora")
+  with_items: "{{ drivers_list }}"
+
+- name: Ensure we're remove all conflicted packages
+  apt:
+    name: "{{ item | regex_replace('_','-')}}"
+    state: absent
+  when: (item | regex_replace('_','-') != required_video_driver) and
+        ((ansible_distribution == "Ubuntu") or
+         (ansible_distribution == "\"elementary\""))
+  with_items: "{{ drivers_list }}"
+
+- name:  get name of the driver - Fix name of the nvidia package for the Ubuntu
+  shell: "ubuntu-drivers devices | grep recommended | grep nvidia | awk '{print $3}'"
+  register: recommended_nvidia
+  when: ( ((ansible_distribution == "Ubuntu") or (ansible_distribution == "\"elementary\"")) and 
+          ((required_video_driver == "xserver-xorg-video-nvidia-340xx") or ( required_video_driver == "xserver-xorg-video-nvidia")) )
+
+- name: Set fact -'Fix name of the nvidia package for the Ubuntu
+  set_fact: 
+   required_video_driver: "{{ recommended_nvidia.stdout }}"
+  when: ( ((ansible_distribution == "Ubuntu") or
+          (ansible_distribution == "\"elementary\"")) and (( required_video_driver == 'xserver-xorg-video-nvidia-340xx') or ( required_video_driver == 'xserver-xorg-video-nvidia')) )
+
+- name: Ensure we delete Nvidia, if our current video card not Nvidia
+  apt:
+    name: "{{ item }}"
+    state: absent
+  when: ( ((ansible_distribution == "Ubuntu") or
+            (ansible_distribution == "\"elementary\"")) and (( required_video_driver != 'nvidia') or ( required_video_driver != 'nvidia-381')) )
+  with_items: 
+    - 'nvidia-381'
+    - 'nvidia'
+
+
+- name: Ensure we have required packages installed (Fedora)
+  dnf:
+    name: "{{ item }}"
+    state: latest
+  with_items:
+    - '@virtualization'
+    - "{{ required_video_driver }}"
+    - 'kernel'
+    - 'kernel-devel'
+  when: ansible_distribution == "Fedora"
+
+- name: Ensure we have required packages installed (Ubuntu/ElementaryOS)
+  apt:
+    name: "{{ item }}"
+    update_cache: yes
+  with_items:
+    - 'nvidia-settings'
+    - "qemu-kvm"
+    - "qemu"
+    - "virt-manager"
+    - "libvirt-bin"
+    - 'curl'
+    - 'ovmf'
+    - "{{ required_video_driver }}"
+  when: ( ansible_distribution == "Ubuntu") or
+        ( ansible_distribution == "\"elementary\"")
+
+- name: seting up radeon driver
+  set_fact:
+    xorg_driver: radeon
+  when: ( required_video_driver == 'xorg-x11-drv-ati') or
+        ( required_video_driver == 'xserver-xorg-video-ati') 
+
+- name: seting up nvidia driver
+  set_fact:
+    xorg_driver: nvidia
+  when: ( required_video_driver == 'xorg-x11-drv-nvidia-340xx') or
+        ( required_video_driver == 'xorg-x11-drv-nvidia') or
+        ( required_video_driver == 'xserver-xorg-video-nvidia') or
+        ( required_video_driver == 'xserver-xorg-video-nvidia_340xx') or
+        ( required_video_driver == 'nvidia-381')
+
+- name: seting up amdgpu driver
+  set_fact:
+    xorg_driver: amdgpu
+  when: ( required_video_driver == 'xorg-x11-drv-amdgpu' ) or
+        ( required_video_driver == 'xserver_xorg_video_amdgpu' )
+
+- name: seting up intel driver
+  set_fact:
+    xorg_driver: intel
+  when: ( required_video_driver == 'xorg-x11-drv-intel' ) or
+        ( required_video_driver == 'xserver-xorg-video-intel' )
+
+- name: Convert format of the PCI ID
+  set_fact:
+    host_videocard_id_converted: "{{ host_videocard_id  | regex_replace('\\.',':') }}"
+
+- name: debug host_videocard_id_converted
+  debug:
+    msg: "{{ host_videocard_id_converted  }}"
+  #when: passthrough_videocard_id is defined
+
+- name: Set Xorg path
+  set_fact:
+    xorg_path: 'xorg.conf.d/discrete.conf'
+  when: ansible_distribution == "Fedora"
+
+- name: Set Xorg path
+  set_fact:
+    xorg_path: 'xorg.conf'
+  when: ( ansible_distribution == "Ubuntu") or
+        ( ansible_distribution == "\"elementary\"")
+
+- name: new Xorg config
+  template:
+    src: xorg_discrete.j2
+    dest: "/etc/X11/{{ xorg_path }}"
+    owner: root
+    group: root
+    mode: 0744
+
+############# Getting PCI passtrough videocard
+
+- name: Getting pci id of the first video card - passthrough videocard
+  shell: 'lspci | grep -i --color "vga\|3d\|2d" | head -1 | cut -f1 -d" "'
+  register: passthrough_videocard_id_register
+  when: revert_video_card
+
+- name: Ansible Workaroud 1 (ansible rewrites register if when failed anyway) - passthrough videocard
+  set_fact:
+    passthrough_videocard_id: "{{ passthrough_videocard_id_register.stdout }}"
+  when: revert_video_card
+
+- name: debug  passthrough_videocard_id - passthrough videocard
+  debug:
+    msg: "{{ passthrough_videocard_id  }}"
+  when: passthrough_videocard_id is defined
+
+- name: Getting pci id of the last video card - passthrough videocard
+  shell: 'lspci | grep -i --color "vga\|3d\|2d" | tail -1 | cut -f1 -d" "'
+  register: passthrough_videocard_id_register
+  when: not revert_video_card
+
+- name: Ansible Workaroud 2 (ansible rewrites register if when failed anyway)- passthrough videocard
+  set_fact:
+    passthrough_videocard_id: "{{ passthrough_videocard_id_register.stdout }}"
+  when: not revert_video_card
+
+- name: debug passthrough_videocard_id2 - passthrough videocard
+  debug:
+    msg: "{{ passthrough_videocard_id }}"
+
+- name: Getting name of the passthrough video card
+  shell: "/usr/local/bin/videocard_name.sh {{ passthrough_videocard_id }}"
+  register: passthrough_videocard_name
+
+- name: debug name of the passthrough videocard
+  debug:
+    msg: "{{ passthrough_videocard_name.stdout }}"
+
+############# setting up IOMMU
+
+- name: Script for checking IOMMU groups
+  template:
+    src: iommu_test.sh.j2
+    dest: /usr/local/bin/iommu_test.sh
+    owner: root
+    group: root
+    mode: 0750
+
+- name: Check if IOMMU enable
+  shell: "/usr/local/bin/iommu_test.sh | wc -l"
+  register: if_iommu_enabled
+
+- name: If IOMMU disabled, then do not try isolating GPU. We need reboot at first!
+  set_fact:
+    iommu_status: false
+  when: if_iommu_enabled.stdout == '0'
+
+- name: Getting iommu group of the video card
+  shell: /usr/local/bin/iommu_test.sh | awk '{print $3,$4}' | grep {{ passthrough_videocard_id }} | awk '{print $1}'
+  when: iommu_status
+  register: iommu_group
+
+- name: Getting id of all devices in the required group
+  shell: /usr/local/bin/iommu_test.sh | grep "IOMMU Group {{ iommu_group.stdout }} " |awk '{print $4}'
+  when: iommu_status
+  register: pci_passthrough_devices_id
+
+- name: debug devices for the pci passtrough
+  when: iommu_status
+  debug:
+    msg: "{{ pci_passthrough_devices_id }}"
+
+- name: Getting vendor's ids for the all devices in the required group
+  shell: "lspci  -n | grep {{ item }} | awk '{print $3}'"
+  when: iommu_status
+  register: pci_passthrough_devices_vendorid
+  with_items: "{{ pci_passthrough_devices_id.stdout_lines }}"
+
+- name: debug 2 devices for the pci passtrough vendor's ids
+  when: iommu_status
+  debug:
+    msg: "{{ item.stdout }}"
+  with_items: "{{ pci_passthrough_devices_vendorid.results }}"
+
+########## getting lvm settings for the GRUB
+
+#- name: Creating empty if_lvm_exist file
+#  shell: "rm -f /tmp/if_lvm_exist; echo ' ' >> /tmp/if_lvm_exist"
+
+- name: Check if lvm lines exist, step1
+  shell: "echo -e {{ item }} >> /tmp/if_lvm_exist"
+  with_items: ansible_cmdline["rd.lvm.uuid"]
+  when: ansible_cmdline["rd.lvm.uuid"] is defined
+
+- name: Check if lvm lines exist, step2
+  shell: wc -l /tmp/if_lvm_exist | cut -f1 -d' '
+  register: if_lvm_exist
+
+- name: Set fact for the grub if/else checker
+  set_fact:
+    grub_if_lvm_exist: true
+  when: if_lvm_exist.stdout >= '1'
+
+- name: debug lvm exist
+  debug:
+    msg: "{{ if_lvm_exist }}"
+
+- name: Getting string for the GRUB, step1
+  set_fact:
+    grub_root_string: "{{ ansible_cmdline.root  | regex_replace('/dev/mapper/','') | regex_replace('--','_#_') | regex_replace('-','/') | regex_replace('_#_','-') }}"
+
+- name: debug getting root string for the GRUB
+  debug:
+    msg: "{{ grub_root_string }}"
+
+- name: getting first dm device which uses for the swap
+  shell: swapon -s | grep '/dev/dm\-[0-9]' | awk '{print $1}' | head -1
+  register: dm_swap_1device
+
+- name: Getting first dm device's number which uses for the swap
+  set_fact:
+    dm_swap_1device_num: "{{ dm_swap_1device.stdout  | regex_replace('/dev/','') }}"
+
+- name: convert swap's dm device name to the lvm path
+  shell: rm -f /tmp/if_swap_exist; ls -l /dev/mapper/ | grep "{{ dm_swap_1device_num }}$" | awk '{print $9}'
+  register: lvm_swap_path
+
+- name: Check if swap exist, step1
+  shell: "echo -e {{ item }} >> /tmp/if_swap_exist"
+  with_items: "{{ lvm_swap_path.stdout_lines }}"
+
+- name: Check if swap exist, step2
+  shell: wc -l /tmp/if_swap_exist | cut -f1 -d' '
+  register: if_swap_exist
+
+- name: debug lvm_swap_path
+  debug:
+    msg: "{{ lvm_swap_path }}"
+
+- name: debug if swap string more then 1 line
+  debug:
+    msg: "{{ if_swap_exist.stdout }}"
+
+- name: Getting swap string for the GRUB
+  set_fact:
+    grub_swap_string: "{{ lvm_swap_path.stdout | regex_replace('--','_#_') | regex_replace('-','/') | regex_replace('_#_','-') }}"
+  when: if_swap_exist.stdout == '1'
+
+- name: debug getting swap string for the GRUB
+  debug:
+    msg: "{{ grub_swap_string }}"
+  when: grub_swap_string is defined
+
+
+### Getting mdraid lines for the GRUB. Workaround to fix ansible bug
+
+#- name: Creating empty if_mdraid_exist file
+#  shell: "rm -f /tmp/if_mdraid_exist; echo ' ' >> /tmp/if_mdraid_exist"
+
+- name: Check if mdraid lines exist, step1
+  shell: "echo -e {{ item }} >> /tmp/if_mdraid_exist"
+  with_items: ansible_cmdline["rd.md.uuid"]
+  when: ansible_cmdline["rd.md.uuid"] is defined
+
+- name: Check if mdraid lines exist, step2
+  shell: wc -l /tmp/if_mdraid_exist | cut -f1 -d' '
+  register: if_mdraid_exist
+  
+- name: debug mdraid exist
+  debug:
+    msg: "{{ if_mdraid_exist }}"
+
+- name: Set fact for the grub if/else checker
+  set_fact:
+    grub_if_mdraid_exist: true
+  when: if_mdraid_exist is defined
+
+- name: getting mdraid lines in the GRUB - first step
+  shell: ls -l /dev/disk/by-id/ | grep md-uuid | awk '{print $9}' | awk -F\- '{print $3}'
+  register: mdraid_grub_lines
+  when: if_mdraid_exist.stdout >= '1'
+  
+- name: debug getting mdraid lines
+  debug:
+    msg: "{{ mdraid_grub_lines }}"
+
+- name: Getting mdraid string for the GRUB
+  set_fact:
+    grub_mdraid_string: "{{ mdraid_grub_lines.stdout_lines }}"
+  when: if_mdraid_exist.stdout >= '1'
+
+#- name: debug getting mdraid lines - for the GRUB
+#  debug:
+#    msg: "{{ grub_mdraid_string }}"
+
+
+##### push GRUB
+
+- name: push /etc/default/grub for Fedora
+  template:
+    src: "_etc_default_grub_fedora.j2"
+    dest: "/etc/default/grub"
+  when: ansible_distribution == "Fedora"
+  notify:
+    - install new grub settings
+
+- name: push /etc/default/grub for Ubuntu
+  template:
+    src: "_etc_default_grub_ubuntu.j2"
+    dest: "/etc/default/grub"
+  when: (ansible_distribution == "Ubuntu") or
+        (ansible_distribution == "\"elementary\"")
+  notify:
+    - install new grub settings
+
+- name: Delete bad coma in the grub config
+  when: iommu_status
+  notify:
+    - install new grub settings
+  replace:
+    destfile: /etc/default/grub
+    regexp: ',   rhgb quiet'
+    replace: ' rhgb quiet'
+    backup: yes
+  notify:
+    - install new grub settings
+  #when: ansible_distribution == "Fedora"
+
+- name: Disable apparmor for the Ubuntu/ElementaryOS...
+  file:
+    src: "/etc/apparmor.d/{{ item }}"
+    dest: "/etc/apparmor.d/disable/{{ item }}"
+    owner: root
+    group: root
+    state: link
+  when: (ansible_distribution == "Ubuntu") or
+        (ansible_distribution == "\"elementary\"")
+  with_items:
+    - 'libvirt'
+    - 'usr.lib.libvirt.virt-aa-helper'
+    - 'usr.sbin.libvirtd'
+

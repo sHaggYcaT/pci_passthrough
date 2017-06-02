@@ -1,0 +1,5 @@
+---
+# handlers file
+- name: install new grub settings
+  command: "{{ grubmkconfig }} -o {{ grubcfg }} " 
+

@@ -1,0 +1,17 @@
+---
+galaxy_info:
+  author: polnoch
+  description: Configure PCI passthrough in the several distributions
+  license: AGPL
+  min_ansible_version: 2.1
+  platforms:
+    - name: Ubuntu
+      versions:
+        - xenial
+    - name: Fedora
+      versions:
+        - 25
+  categories:
+    - desktop
+    - virtualization
+dependencies: []

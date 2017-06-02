@@ -1,0 +1,7 @@
+GRUB_TIMEOUT=5
+GRUB_DISTRIBUTOR="$(sed 's, release .*$,,g' /etc/system-release)"
+GRUB_DEFAULT=saved
+GRUB_DISABLE_SUBMENU=true
+GRUB_TERMINAL_OUTPUT="console"
+GRUB_CMDLINE_LINUX="crashkernel=auto rd.lvm.lv={{ grub_root_string }} {% if grub_swap_string is defined %} rd.lvm.lv={{ grub_swap_string }} {% endif %} {% if ansible_cmdline["rd.md.uuid"] is defined %} {% for item in grub_mdraid_string %}rd.md.uuid={{ item }} {% endfor %} {% endif %} {% if pci_passthrough == true  %} {% if broken_iommu_motherboard == true %} iommu=pt {% endif %} intel_iommu=on {% if iommu_status == true %} pci-stub.ids={% for item in pci_passthrough_devices_vendorid.results %}{{ item.stdout }},{% endfor %} {% endif %} {% endif %} rhgb quiet"
+GRUB_DISABLE_RECOVERY="true"

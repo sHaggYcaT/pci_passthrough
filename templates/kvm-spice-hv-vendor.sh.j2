@@ -1,0 +1,4 @@
+#!/usr/bin/env bash
+
+exec /usr/bin/kvm-spice \
+	     `echo "\$@" | sed 's/kvm=off/kvm=off,hv_vendor_id=null/g'`

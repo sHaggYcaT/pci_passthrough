@@ -1,0 +1,7 @@
+---
+
+drivers_list_path: "/usr/local/share/applications/"
+revert_video_card: false
+broken_iommu_motherboard: false
+pci_passthrough: true
+iommu_status: true

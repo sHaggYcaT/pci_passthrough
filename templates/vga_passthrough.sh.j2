@@ -1,0 +1,26 @@
+#!/bin/bash
+
+CURUSER=$(whoami);
+
+ANS_VER=$(ansible-playbook --version | head -1 | awk '{print $2}' | awk -F\. '{print $1"."$2}')
+
+if [ $ANS_VER != '2.2' ]; then
+	echo "Error! Please install ansible 2.2"
+	exit 1
+fi
+
+
+
+if [ $CURUSER != 'root' ]; then
+        echo "Error! Incorrect user! You have to run this script under root only!";
+        exit 1;
+else
+        echo 'We will enable PCI passthrough system. If it is not installed, this script install it and enable IOMMU. In last case please reboot your PC and run script again. Please press Enter if you want to run script, or press Ctrl+c, if you want to exit';
+        read
+
+fi
+
+
+cd /root/ansible
+
+ANSIBLE_CONFIG=ansible.cfg ansible-playbook -i desktop, -c local playbook_libvirt.yml

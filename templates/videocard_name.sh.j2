@@ -1,0 +1,17 @@
+#!/bin/bash
+
+PCI=$1
+
+NAME1=$(lspci -s $PCI | awk -F\[ '{print $2}' | awk -F\] '{print $1}')
+
+NAME2=$(lspci -s $PCI | awk -F\[ '{print $3}' | awk -F\] '{print $1}')
+
+
+if  [ -z "$NAME1" ] && [ -z "$NAME2" ]  ; then
+
+     NAME1=$(lspci -s $PCI | awk -F\: '{print $3}' | sed 's/^ //g' | sed 's/ (rev 06)//g')
+fi
+
+
+echo $NAME1 $NAME2
+
